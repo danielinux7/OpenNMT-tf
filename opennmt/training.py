@@ -388,6 +388,56 @@ class HorovodTrainer(Trainer):
   def _all_reduce_sum(self, value):
     return self._hvd.allreduce(value, op=self._hvd.Sum)
 
+class TPUStrategyTrainer(Trainer):
+  """Trainer based on ``tf.distribute.MirroredStrategy`` for local multi-TPU training."""
+
+  def __init__(self, model, optimizer, checkpoint=None, devices=None):
+    """Initializes the MirroredStrategy trainer.
+
+    Args:
+      model: A :class:`opennmt.models.Model` instance to train.
+      optimizer: A ``tf.keras.optimizers.Optimizer`` instance.
+      checkpoint: A :class:`opennmt.utils.checkpoint.Checkpoint` instance. If
+        not set, no checkpoints will be saved.
+      devices: List of device strings to use for training. If not set, all
+        visible TPUs are used.
+    """
+    super().__init__(model, optimizer, checkpoint=checkpoint)
+    self._strategy = tf.distribute.experimental.TPUStrategy()
+    with self._strategy.scope():
+      # Create some variables under the strategy scope.
+      _ = self._optimizer.iterations
+
+  @property
+  def num_replicas(self):
+    return self._strategy.num_replicas_in_sync
+
+  def _finalize_dataset(self, dataset):
+    # We prefer not to use experimental_distribute_dataset here because it
+    # sometimes fails to split the batches (noticed with tokens batch type).
+    # We also assume for now that we are training with a single worker
+    # otherwise we would need to correctly shard the input dataset.
+    dataset_fn = dataset if callable(dataset) else lambda _: dataset
+    return self._strategy.experimental_distribute_datasets_from_function(dataset_fn)
+
+  def _forward_and_step(self, source, target, record_summaries=False):
+    per_replica_loss = self._strategy.run(
+        super()._forward_and_step,
+        args=(source, target),
+        kwargs=dict(record_summaries=record_summaries))
+    return self._strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica_loss, None)
+
+  def _forward(self, source, target, record_summaries=False):
+    per_replica_loss = self._strategy.run(
+        super()._forward,
+        args=(source, target),
+        kwargs=dict(record_summaries=record_summaries))
+    # TODO: this reduction could be delayed until _step is called.
+    return self._strategy.reduce(tf.distribute.ReduceOp.MEAN, per_replica_loss, None)
+
+  def _step(self):
+    self._strategy.run(super()._step)
+
 
 class MirroredStrategyTrainer(Trainer):
   """Trainer based on ``tf.distribute.MirroredStrategy`` for local multi-GPU training."""

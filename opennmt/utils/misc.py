@@ -27,7 +27,14 @@ def get_devices(count=1, fallback_to_cpu=True):
   Raises:
     ValueError: if :obj:`count` is greater than the number of visible devices.
   """
-  devices = tf.config.list_logical_devices(device_type="GPU")
+
+  if os.environ['COLAB_TPU_ADDR']:
+    resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu='grpc://' + os.environ['COLAB_TPU_ADDR'])
+    tf.config.experimental_connect_to_cluster(resolver)
+    tf.tpu.experimental.initialize_tpu_system(resolver)
+    devices = tf.config.list_logical_devices(device_type="TPU")
+  if not devices:
+    devices = tf.config.list_logical_devices(device_type="GPU")
   if not devices and fallback_to_cpu:
     devices = tf.config.list_logical_devices(device_type="CPU")
   if len(devices) < count:
